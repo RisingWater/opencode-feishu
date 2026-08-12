@@ -182,17 +182,17 @@ export async function handleTimelineChat(
     if (!manager) return
     switch (action.type) {
       case "reasoning-updated":
-        log("info", "timeline.reasoning-updated", { partID: action.partID, len: action.text.length, manager: !!manager })
-        if (manager) await manager.ensureThinkingCard(action.partID, action.text)
+        log("info", "timeline.reasoning-updated", { partID: action.partID, len: action.text.length, time: action.time, manager: !!manager })
+        if (manager) await manager.ensureThinkingCard(action.partID, action.text, action.time)
         break
       case "tool-state-changed":
-        log("info", "timeline.tool-state-changed", { callID: action.callID, tool: action.tool, state: action.state, manager: !!manager })
-        if (manager) await manager.ensureToolCard(action.callID, action.tool, action.state, action.input, action.output)
+        log("info", "timeline.tool-state-changed", { callID: action.callID, tool: action.tool, state: action.state, time: action.time, manager: !!manager })
+        if (manager) await manager.ensureToolCard(action.callID, action.tool, action.state, action.input, action.output, action.time)
         break
       case "text-updated":
         // 过渡叙述文本：独立卡片展示（工具调用前后的过程性文字），不带状态字样。
-        log("info", "timeline.text-updated", { partID: action.partID, len: action.fullText?.length ?? 0, preview: action.fullText?.slice(0, 80), manager: !!manager })
-        if (action.fullText && action.partID && manager) await manager.ensureTextCard(action.partID, action.fullText)
+        log("info", "timeline.text-updated", { partID: action.partID, len: action.fullText?.length ?? 0, time: action.time, preview: action.fullText?.slice(0, 80), manager: !!manager })
+        if (action.fullText && action.partID && manager) await manager.ensureTextCard(action.partID, action.fullText, action.time)
         break
       case "permission-requested":
         if (deps.interactiveDeps) {

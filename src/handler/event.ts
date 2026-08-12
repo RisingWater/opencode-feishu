@@ -223,9 +223,16 @@ async function handleMessagePartUpdated(
     const p = part as Record<string, unknown>
     const toolName = String(p.tool ?? "unknown")
     const callID = String(p.callID ?? "")
-    const stateObj = p.state as { status?: string; input?: Record<string, unknown>; output?: string } | undefined
+    const stateObj = p.state as { status?: string; input?: Record<string, unknown>; output?: string; time?: { start?: number } } | undefined
     const rawStatus = stateObj?.status ?? (p.error != null ? "error" : "running")
+    // 首次 pending 事件无 time.start（SDK 的 ToolStatePending 结构没有 time 字段），
+    // 直接跳过，等后续 running 事件携带 state.time.start 再入队，保证工具卡有时间戳参与排序。
+    if (rawStatus === "pending") return
     const toolState: "running" | "completed" | "error" = (rawStatus === "completed" || rawStatus === "error") ? rawStatus : "running"
+
+    log("info", "event.tool.part", {
+      callID, tool: toolName, rawStatus, stateTimeStart: stateObj?.time?.start, stateKeys: stateObj ? Object.keys(stateObj) : null,
+    })
 
     if (partSessionId) {
       emit(partSessionId, {
@@ -236,7 +243,8 @@ async function handleMessagePartUpdated(
         state: toolState,
         input: stateObj?.input,
         output: stateObj?.output,
-        time: (p.time as { start?: number } | undefined)?.start,
+        // 工具时间戳在 state.time.start（ToolState 结构），不在 part.time。
+        time: stateObj?.time?.start,
       }, log)
     }
     return

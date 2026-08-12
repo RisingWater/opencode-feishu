@@ -279,6 +279,23 @@ export interface TimelineManagerMeta {
  * 对外 API 全部串行执行（内部 queue），避免并发 SSE 事件导致建卡/更新竞态。
  * 卡片创建或更新失败仅降级日志，不阻断主对话流程。
  */
+
+/** 待建卡队列 key：think=partID，tool=callID，trans=partID。 */
+type PendingCardKey = `think:${string}` | `tool:${string}` | `trans:${string}`
+
+/** 待建卡条目：携带 part.time.start，flush 时按 time 升序建卡保证顺序。 */
+interface PendingCard {
+  /** 真实输出顺序时间戳。 */
+  time: number
+  /** 卡片标题。 */
+  title: string
+  /** 卡片正文。 */
+  content?: string
+  /** 是否需要中断按钮（用户卡不需要）。 */
+  withAbort?: boolean
+  /** 工具/思考/过渡的类型标记。 */
+  kind: "think" | "tool" | "trans"
+}
 export class TimelineManager {
   private thinkingCard?: TimelineCard
   private thinkingPartID = ""
@@ -291,6 +308,12 @@ export class TimelineManager {
   private readonly closedTransitionPartIDs = new Set<string>()
   /** 轮询/事件期间累积的最终文本，finalize 时才创建最终答复卡。 */
   private pendingFinalText = ""
+  /**
+   * 待建卡队列：SSE 事件先入队（带 time.start），200ms 窗口后按 time 排序批量建卡，
+   * 保证时间线顺序与 TUI 一致（不依赖事件到达顺序）。
+   */
+  private readonly pendingCards = new Map<string, PendingCard>()
+  private flushTimer: ReturnType<typeof setTimeout> | null = null
   private queue: Promise<void> = Promise.resolve()
 
   constructor(
@@ -318,21 +341,24 @@ export class TimelineManager {
   }
 
   /** 新增/更新 thinking 卡。partID 变化视为新一轮思考。 */
-  ensureThinkingCard(partID: string, text: string): Promise<void> {
+  ensureThinkingCard(partID: string, text: string, time?: number): Promise<void> {
     return this.enqueue(async () => {
       if (this.terminalState) return
-      if (partID !== this.thinkingPartID) {
-        await this.closeActiveThinking()
-        const created = await this.createCard({
-          title: "💭 思考过程",
-          content: text,
-        })
-        this.log("info", "timeline.thinkingCard.created", { partID, newPart: partID !== this.thinkingPartID, created: !!created })
-        if (!created) return
-        this.thinkingPartID = partID
-        this.thinkingCard = created
+      // 已建卡：直接更新内容。
+      if (this.thinkingCard && this.thinkingPartID === partID) {
+        await this.thinkingCard.replaceText(text)
+        return
       }
-      await this.thinkingCard?.replaceText(text)
+      // 未建卡：入队等 flush 按时间排序建卡。
+      const key = `think:${partID}`
+      const existing = this.pendingCards.get(key)
+      this.pendingCards.set(key, {
+        time: mergePendingTime(existing?.time, time),
+        title: "💭 思考过程",
+        content: text,
+        kind: "think",
+      })
+      this.scheduleFlush()
     })
   }
 
@@ -343,28 +369,34 @@ export class TimelineManager {
     state: "running" | "completed" | "error",
     input?: Record<string, unknown>,
     output?: string,
+    time?: number,
   ): Promise<void> {
     return this.enqueue(async () => {
       if (this.terminalState) return
-      let card = this.toolCards.get(callID)
-      if (!card) {
-        // 新工具开始：先定格当前思考卡和过渡卡，让时间线顺序正确。
-        await this.closeActiveThinking()
-        await this.closeTransitionCards()
-        const created = await this.createCard({
-          title: normalizeToolTitle(tool),
-          content: buildToolContent(input, output),
-        })
-        this.log("info", "timeline.toolCard.created", { callID, tool, state, created: !!created })
-        if (!created) return
-        card = created
-        this.toolCards.set(callID, card)
+      // 已建卡：直接更新内容/状态。
+      const existing = this.toolCards.get(callID)
+      if (existing) {
+        if (input) await existing.replaceText(buildToolContent(input, output))
+        if (state === "completed" || state === "error") {
+          await existing.close()
+          this.toolCards.delete(callID)
+        }
+        return
       }
-      if (input) await card?.replaceText(buildToolContent(input, output))
-      if (state === "completed" || state === "error") {
-        await card?.close()
-        this.toolCards.delete(callID)
-      }
+      // 未建卡：入队等 flush 按时间排序建卡。
+      const key = `tool:${callID}`
+      const existingPending = this.pendingCards.get(key)
+      const mergedTime = mergePendingTime(existingPending?.time, time)
+      this.log("info", "timeline.tool.pending", {
+        callID, tool, state, time, existingTime: existingPending?.time, mergedTime,
+      })
+      this.pendingCards.set(key, {
+        time: mergedTime,
+        title: normalizeToolTitle(tool),
+        content: buildToolContent(input, output),
+        kind: "tool",
+      })
+      this.scheduleFlush()
     })
   }
 
@@ -372,7 +404,7 @@ export class TimelineManager {
    * 过渡叙述文本（工具调用前后的过程性文字），独立卡片展示，不带状态字样。
    * 过滤 OpenCode 回显的用户消息前缀。
    */
-  ensureTextCard(partID: string, text: string): Promise<void> {
+  ensureTextCard(partID: string, text: string, time?: number): Promise<void> {
     return this.enqueue(async () => {
       if (this.terminalState) return
       // 已定格移除的 partID 不重复建卡。
@@ -394,18 +426,23 @@ export class TimelineManager {
           break
         }
       }
-      let card = this.transitionCards.get(partID)
-      if (!card) {
-        card = await this.createCard({
-          title: "📝 处理中",
-          content: effective,
-          withAbort: false,
-        })
-        this.log("info", "timeline.transitionCard.created", { partID, created: !!card })
-        if (!card) return
-        this.transitionCards.set(partID, card)
+      // 已建卡：更新内容。
+      const built = this.transitionCards.get(partID)
+      if (built) {
+        await built.replaceText(effective)
+        return
       }
-      await card.replaceText(effective)
+      // 未建卡：入队等 flush 按时间排序建卡。
+      const key = `trans:${partID}`
+      const existingPending = this.pendingCards.get(key)
+      this.pendingCards.set(key, {
+        time: mergePendingTime(existingPending?.time, time),
+        title: "📝 处理中",
+        content: effective,
+        withAbort: false,
+        kind: "trans",
+      })
+      this.scheduleFlush()
     })
   }
 
@@ -421,6 +458,12 @@ export class TimelineManager {
   async finalize(state: ReplyRunState, conclusion?: string): Promise<void> {
     return this.enqueue(async () => {
       this.terminalState = toTerminalState(state)
+      // 清掉未触发的 flush timer，强制建完剩余 pending 卡。
+      if (this.flushTimer) {
+        clearTimeout(this.flushTimer)
+        this.flushTimer = null
+      }
+      await this.flushPendingCards()
       await this.closeActiveThinking()
       await this.closeTransitionCards()
       if (this.userCard) {
@@ -442,6 +485,49 @@ export class TimelineManager {
       this.finalCard = created
       await created.close()
     })
+  }
+
+  /**
+   * 安排一次 flush：缓冲窗口内到达的 SSE 事件一起按 time.start 排序建卡。
+   * 200ms 足够覆盖相邻事件的到达间隔，同时不显著延迟卡片显示。
+   */
+  private scheduleFlush(): void {
+    if (this.flushTimer) return
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null
+      this.enqueue(async () => {
+        await this.flushPendingCards()
+      })
+    }, 200)
+  }
+
+  /** 按 time 升序建卡；建完后已建卡走实时更新路径。 */
+  private async flushPendingCards(): Promise<void> {
+    if (this.terminalState || this.pendingCards.size === 0) return
+    const entries = Array.from(this.pendingCards.entries())
+    this.log("info", "timeline.flush.start", {
+      count: entries.length,
+      pending: entries.map(([k, v]) => ({ key: k, title: v.title, time: v.time })),
+    })
+    const sorted = entries.sort((a, b) => a[1].time - b[1].time)
+    this.pendingCards.clear()
+    for (const [key, item] of sorted) {
+      const created = await this.createCard({
+        title: item.title,
+        content: item.content,
+        withAbort: item.withAbort,
+      })
+      if (!created) continue
+      this.log("info", "timeline.card.flushed", { key, title: item.title, time: item.time })
+      if (key.startsWith("tool:")) {
+        this.toolCards.set(key.slice("tool:".length), created)
+      } else if (key.startsWith("think:")) {
+        this.thinkingPartID = key.slice("think:".length)
+        this.thinkingCard = created
+      } else if (key.startsWith("trans:")) {
+        this.transitionCards.set(key.slice("trans:".length), created)
+      }
+    }
   }
 
   private async createCard(
@@ -507,6 +593,16 @@ function normalizeToolTitle(tool: string): string {
   const cleaned = tool.replace(/\s+/g, " ").trim()
   const limited = cleaned.length <= 50 ? cleaned : `${cleaned.slice(0, 49)}…`
   return limited || "工具调用"
+}
+
+/**
+ * 合并待建卡时间戳：首次事件可能不带 time（回退 MAX），后续事件带来真实 time 时覆盖。
+ * 已有时戳优先保留（更早的起始时间），MAX 占位则被真实 time 替换。
+ */
+function mergePendingTime(existing: number | undefined, incoming: number | undefined): number {
+  if (incoming === undefined) return existing ?? Number.MAX_SAFE_INTEGER
+  if (existing === undefined || existing === Number.MAX_SAFE_INTEGER) return incoming
+  return existing
 }
 
 function toTerminalState(state: ReplyRunState): ReplyTerminalState | undefined {
