@@ -346,6 +346,11 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
     },
     "card.action.trigger": async (data: Record<string, unknown>) => {
       try {
+        log("info", "gateway.card.action.trigger 收到回调", {
+          tag: (data as { action?: { tag?: string } }).action?.tag,
+          value: (data as { action?: { value?: unknown } }).action?.value,
+          operator: (data as { operator?: { open_id?: string } }).operator?.open_id,
+        })
         // 类型化事件 payload（双路径兼容 SDK v1/v2 格式）。
         const evt = data as CardActionEvt
         const action: CardActionData = {

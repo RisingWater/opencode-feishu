@@ -374,7 +374,9 @@ function sendRequestCard(params: {
 
   void (async () => {
     const res = await sender.sendInteractiveCard(deps.feishuClient, chatId, card, deps.log)
-    if (!res.ok) {
+    if (res.ok) {
+      deps.log("info", "交互卡片发送成功", { requestId, chatId })
+    } else {
       // 发送失败要回滚占位，避免后续相同 requestId 永久失去重试机会。
       unmarkSeen(requestId)
       deps.log("error", sendFailureMessage, {
@@ -463,6 +465,11 @@ export async function handleCardAction(
   action: CardActionData,
   deps: InteractiveDeps,
 ): Promise<object | undefined> {
+  deps.log("info", "handleCardAction 收到卡片回调", {
+    actionValue: action.actionValue,
+    actionTag: action.actionTag,
+    operatorId: action.operatorId,
+  })
   const value = parseCardActionValue(action.actionValue, deps.log)
   if (!value || value.action === "send_message") {
     return buildCallbackResponse(action, deps.log)
@@ -576,15 +583,35 @@ export async function handleCardAction(
 
   try {
     if (value.action === "permission_reply") {
-      void deps.v2Client.permission.reply({
-        requestID: value.requestId,
-        reply: value.reply,
-      }).then(() => emitPhase("completed", successBody)).catch(onReplyFailed)
+      // 优先用 v1 client（opencode 注入，请求路径正确）；回退到 v2 client。
+      const req = deps.client
+        ? deps.client.postSessionIdPermissionsPermissionId({
+            path: { id: value.sessionId, permissionID: value.requestId },
+            body: { response: value.reply as "once" | "always" | "reject" },
+            query: { directory: deps.directory },
+          })
+        : deps.v2Client!.permission.reply({
+            requestID: value.requestId,
+            reply: value.reply,
+          })
+      void Promise.resolve(req)
+        .then(() => {
+          deps.log("info", "permission.reply 成功", { requestId: value.requestId, reply: value.reply, viaV1: !!deps.client })
+          emitPhase("completed", successBody)
+        })
+        .catch(onReplyFailed)
     } else {
-      void deps.v2Client.question.reply({
+      // 问答回传：v1 client 无 question 专用方法，走 v2 client。
+      const req = deps.v2Client!.question.reply({
         requestID: value.requestId,
         answers: value.answers,
-      }).then(() => emitPhase("completed", successBody)).catch(onReplyFailed)
+      })
+      void Promise.resolve(req)
+        .then(() => {
+          deps.log("info", "question.reply 成功", { requestId: value.requestId })
+          emitPhase("completed", successBody)
+        })
+        .catch(onReplyFailed)
     }
   } catch (err) {
     onReplyFailed(err)
