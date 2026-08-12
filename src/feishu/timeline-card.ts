@@ -21,6 +21,7 @@ import {
   buildActionsElement,
   buildCompactStatus,
   buildStatusMarkdown,
+  normalizeReplyTitle,
 } from "./result-card-view.js"
 import { cleanMarkdown, truncateMarkdown } from "./markdown.js"
 import type { ReplyTerminalState, ReplyRunState } from "../handler/reply-run-registry.js"
@@ -28,18 +29,27 @@ import type { ReplyTerminalState, ReplyRunState } from "../handler/reply-run-reg
 /** 卡片正文为空时的 plugin UI 占位描述。 */
 const EMPTY_CARD_PLACEHOLDER = "_⏳ 等待中…_"
 
-/** 工具卡运行状态对应的状态文案。 */
-function toolStatusText(state: "running" | "completed" | "error"): string {
-  switch (state) {
-    case "running":
-      return "🔄 运行中"
-    case "completed":
-      return "✅ 已完成"
-    case "error":
-      return "❌ 失败"
-    default:
-      return state
+/** 工具卡正文：命令（input）+ 输出（output）。 */
+function buildToolContent(input: Record<string, unknown> | undefined, output: string | undefined): string {
+  const sections: string[] = []
+  const commandText = extractToolCommand(input)
+  if (commandText) {
+    sections.push(`**命令**\n\`\`\`\n${commandText}\n\`\`\``)
+  } else if (input && Object.keys(input).length > 0) {
+    sections.push(`**入参**\n\`\`\`\n${JSON.stringify(input, null, 2)}\n\`\`\``)
   }
+  if (output && output.trim()) {
+    sections.push(`**输出**\n\`\`\`\n${output.trim()}\n\`\`\``)
+  }
+  return sections.length > 0 ? sections.join("\n\n") : EMPTY_CARD_PLACEHOLDER
+}
+
+/** 从工具入参提取可展示的命令文本（bash 等命令行工具）。 */
+function extractToolCommand(input: Record<string, unknown> | undefined): string | undefined {
+  if (!input) return undefined
+  const candidate = input.command ?? input.cmd ?? input.command_line ?? input.description
+  if (typeof candidate !== "string" || !candidate.trim()) return undefined
+  return candidate.trim()
 }
 
 /** 单张时间线卡 schema 构建参数。 */
@@ -47,7 +57,7 @@ function buildCardSchema(params: {
   title: string
   status?: string
   content?: string
-  abort: ReturnType<typeof buildAbortAction>
+  abort?: ReturnType<typeof buildAbortAction>
 }): CardKitSchema {
   const elements: Array<Record<string, unknown>> = []
   if (params.status) {
@@ -57,15 +67,16 @@ function buildCardSchema(params: {
       content: params.status,
     })
   }
-  if (params.content) {
-    elements.push({
-      tag: "markdown",
-      element_id: REPLY_ELEMENT_ID,
-      content: params.content,
-    })
+  // reply_text 元素始终存在（用占位内容），否则后续 replaceText 更新不存在的元素会失败。
+  elements.push({
+    tag: "markdown",
+    element_id: REPLY_ELEMENT_ID,
+    content: params.content ?? EMPTY_CARD_PLACEHOLDER,
+  })
+  if (params.abort) {
+    const actionsElement = buildActionsElement([params.abort])
+    if (actionsElement) elements.push(actionsElement)
   }
-  const actionsElement = buildActionsElement([params.abort])
-  if (actionsElement) elements.push(actionsElement)
 
   return {
     data: {
@@ -99,10 +110,16 @@ export class TimelineCard {
   private contentTimer: ReturnType<typeof setTimeout> | null = null
   /** 当前累积的内容文本。 */
   private text = ""
+  /** 当前累积的内容文本（只读，供 TimelineManager 去重判断）。 */
+  get currentText(): string {
+    return this.text
+  }
   /** 避免重复写相同内容。 */
   private readonly rendered = { status: "", content: "" }
   /** CardKit 中途更新失败后进入 degraded：停止刷新但保留本地快照。 */
   private degraded = false
+  /** 卡片是否带中断按钮（决定 close 时是否删除 actions 元素）。 */
+  private hasActions = false
 
   constructor(
     private readonly cardkit: CardKitClient,
@@ -112,14 +129,16 @@ export class TimelineCard {
   ) {}
 
   /** 创建卡片实体并发送到飞书聊天，返回消息 ID。 */
-  async start(params: { title: string; status?: string; content?: string; abort: ReturnType<typeof buildAbortAction> }): Promise<string> {
+  async start(params: { title: string; status?: string; content?: string; abort?: ReturnType<typeof buildAbortAction> }): Promise<string> {
     const schema = buildCardSchema(params)
+    this.hasActions = !!params.abort
     this.cardId = await this.cardkit.createCard(schema)
     const res = await sender.sendCardMessage(this.feishuClient, this.chatId, this.cardId, this.log)
     if (!res.ok || !res.messageId) {
       throw new Error(`发送时间线卡片消息失败: ${res.error ?? "unknown"}`)
     }
     this.rendered.status = params.status ?? ""
+    this.text = params.content ?? ""
     this.rendered.content = normalizeTimelineContent(params.content ?? "")
     this.messageId = res.messageId
     return this.messageId
@@ -151,6 +170,18 @@ export class TimelineCard {
       return
     }
     this.flushContentTimer()
+    if (this.hasActions) {
+      this.enqueue(async () => {
+        if (this.degraded || !this.cardId) return
+        try {
+          await this.cardkit.deleteElement(this.cardId, ACTIONS_ELEMENT_ID, ++this.seq)
+        } catch (err) {
+          this.log("error", "TimelineCard close 移除中断按钮失败", {
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      })
+    }
     await this.drain()
     if (this.degraded) {
       this.closed = true
@@ -238,8 +269,8 @@ export class TimelineCard {
 export interface TimelineManagerMeta {
   runId: string
   sessionId: string
-  /** 最终答复卡的标题（用户消息首行）。 */
-  title: string
+  /** 用户消息完整原文，用于过滤 OpenCode 回显的 text part。 */
+  userText: string
 }
 
 /**
@@ -252,8 +283,14 @@ export class TimelineManager {
   private thinkingCard?: TimelineCard
   private thinkingPartID = ""
   private readonly toolCards = new Map<string, TimelineCard>()
+  private readonly transitionCards = new Map<string, TimelineCard>()
   private finalCard?: TimelineCard
+  private userCard?: TimelineCard
   private terminalState?: ReplyTerminalState
+  /** 已被定格移除的过渡 partID：后续同 partID 文本不再重复建卡。 */
+  private readonly closedTransitionPartIDs = new Set<string>()
+  /** 轮询/事件期间累积的最终文本，finalize 时才创建最终答复卡。 */
+  private pendingFinalText = ""
   private queue: Promise<void> = Promise.resolve()
 
   constructor(
@@ -264,6 +301,22 @@ export class TimelineManager {
     private readonly meta: TimelineManagerMeta,
   ) {}
 
+  /** 用户消息确认卡：友好提示已收到，开始处理。无 abort 按钮。 */
+  ensureUserMessageCard(text: string): Promise<void> {
+    return this.enqueue(async () => {
+      if (this.terminalState) return
+      if (this.userCard) return
+      const created = await this.createCard({
+        title: normalizeReplyTitle(this.meta.userText),
+        content: `${text}\n\n_收到，开始处理…_`,
+        withAbort: false,
+      })
+      this.log("info", "timeline.userCard.created", { created: !!created })
+      if (!created) return
+      this.userCard = created
+    })
+  }
+
   /** 新增/更新 thinking 卡。partID 变化视为新一轮思考。 */
   ensureThinkingCard(partID: string, text: string): Promise<void> {
     return this.enqueue(async () => {
@@ -272,8 +325,9 @@ export class TimelineManager {
         await this.closeActiveThinking()
         const created = await this.createCard({
           title: "💭 思考过程",
-          status: "💭 思考中",
+          content: text,
         })
+        this.log("info", "timeline.thinkingCard.created", { partID, newPart: partID !== this.thinkingPartID, created: !!created })
         if (!created) return
         this.thinkingPartID = partID
         this.thinkingCard = created
@@ -283,42 +337,83 @@ export class TimelineManager {
   }
 
   /** 新增/更新工具卡。按 callID 区分；终态时定格。 */
-  ensureToolCard(callID: string, tool: string, state: "running" | "completed" | "error"): Promise<void> {
+  ensureToolCard(
+    callID: string,
+    tool: string,
+    state: "running" | "completed" | "error",
+    input?: Record<string, unknown>,
+    output?: string,
+  ): Promise<void> {
     return this.enqueue(async () => {
       if (this.terminalState) return
       let card = this.toolCards.get(callID)
       if (!card) {
-        // 新工具开始：先定格当前思考卡，让时间线顺序正确。
+        // 新工具开始：先定格当前思考卡和过渡卡，让时间线顺序正确。
         await this.closeActiveThinking()
+        await this.closeTransitionCards()
         const created = await this.createCard({
           title: normalizeToolTitle(tool),
-          status: toolStatusText(state),
+          content: buildToolContent(input, output),
         })
+        this.log("info", "timeline.toolCard.created", { callID, tool, state, created: !!created })
         if (!created) return
         card = created
         this.toolCards.set(callID, card)
       }
-      await card?.setStatus(toolStatusText(state))
+      if (input) await card?.replaceText(buildToolContent(input, output))
       if (state === "completed" || state === "error") {
         await card?.close()
+        this.toolCards.delete(callID)
       }
     })
   }
 
-  /** 新增/更新最终答复卡。幂等：收到首个 text 时才创建。 */
+  /**
+   * 过渡叙述文本（工具调用前后的过程性文字），独立卡片展示，不带状态字样。
+   * 过滤 OpenCode 回显的用户消息前缀。
+   */
+  ensureTextCard(partID: string, text: string): Promise<void> {
+    return this.enqueue(async () => {
+      if (this.terminalState) return
+      // 已定格移除的 partID 不重复建卡。
+      if (this.closedTransitionPartIDs.has(partID)) return
+      let effective = text.trim()
+      if (this.meta.userText.trim() && effective.startsWith(this.meta.userText.trim())) {
+        effective = effective.slice(this.meta.userText.trim().length).trim()
+      }
+      if (!effective) return
+      // 去重：OpenCode 的 text part 快照是累积的——新 partID 的内容包含之前 part 的完整文本。
+      // 若本段文本与任一已显示过渡卡相同，或以其为前缀只新增了后缀，则跳过重复 / 只显示新增部分。
+      for (const [, existing] of this.transitionCards) {
+        const prev = existing.currentText.trim()
+        if (!prev) continue
+        if (effective === prev) return // 内容完全重复：不建卡
+        if (effective.startsWith(prev)) {
+          effective = effective.slice(prev.length).trim()
+          if (!effective) return
+          break
+        }
+      }
+      let card = this.transitionCards.get(partID)
+      if (!card) {
+        card = await this.createCard({
+          title: "📝 处理中",
+          content: effective,
+          withAbort: false,
+        })
+        this.log("info", "timeline.transitionCard.created", { partID, created: !!card })
+        if (!card) return
+        this.transitionCards.set(partID, card)
+      }
+      await card.replaceText(effective)
+    })
+  }
+
+  /** 累积最终答复文本，finalize 时创建最终答复卡。 */
   ensureFinalCard(text: string): Promise<void> {
     return this.enqueue(async () => {
       if (this.terminalState) return
-      await this.closeActiveThinking()
-      if (!this.finalCard) {
-        const created = await this.createCard({
-          title: this.meta.title,
-          status: "⏳ 正在生成回复",
-        })
-        if (!created) return
-        this.finalCard = created
-      }
-      await this.finalCard?.replaceText(text)
+      this.pendingFinalText = text
     })
   }
 
@@ -327,29 +422,42 @@ export class TimelineManager {
     return this.enqueue(async () => {
       this.terminalState = toTerminalState(state)
       await this.closeActiveThinking()
+      await this.closeTransitionCards()
+      if (this.userCard) {
+        await this.userCard.close()
+        this.userCard = undefined
+      }
       for (const card of this.toolCards.values()) {
         await card.close()
       }
       this.toolCards.clear()
-      if (this.finalCard) {
-        await this.finalCard.setStatus(buildStatusMarkdown(buildCompactStatus(state)))
-        if (conclusion) {
-          await this.finalCard.replaceText(conclusion)
-        }
-        await this.finalCard.close()
-      }
+      // 最终答复卡在收尾阶段才创建，保证时间线顺序（思考 → 工具 → 最终答复）。
+      const finalText = conclusion ?? this.pendingFinalText
+      const created = await this.createCard({
+        title: "🤖 最终答复",
+        status: buildStatusMarkdown(buildCompactStatus(state)),
+        content: finalText,
+      })
+      if (!created) return
+      this.finalCard = created
+      await created.close()
     })
   }
 
-  private async createCard(params: { title: string; status?: string }): Promise<TimelineCard | undefined> {
+  private async createCard(
+    params: { title: string; status?: string; content?: string; withAbort?: boolean },
+  ): Promise<TimelineCard | undefined> {
     const card = new TimelineCard(this.cardkit, this.feishuClient, this.chatId, this.log)
     try {
       await card.start({
         title: params.title,
         status: params.status,
-        content: EMPTY_CARD_PLACEHOLDER,
-        abort: buildAbortAction(this.meta.runId, this.meta.sessionId),
+        content: params.content ?? EMPTY_CARD_PLACEHOLDER,
+        abort: params.withAbort !== false
+          ? buildAbortAction(this.meta.runId, this.meta.sessionId)
+          : undefined,
       })
+      this.log("info", "timeline.card.created", { title: params.title, runId: this.meta.runId })
       return card
     } catch (err) {
       this.log("error", "创建时间线卡片失败（跳过该卡片，不阻断主流程）", {
@@ -368,6 +476,15 @@ export class TimelineManager {
       this.thinkingCard = undefined
     }
     this.thinkingPartID = ""
+  }
+
+  /** 定格并移除所有过渡卡，记录已关闭 partID 防重复。 */
+  private async closeTransitionCards(): Promise<void> {
+    for (const [partID, card] of this.transitionCards) {
+      await card.close()
+      this.closedTransitionPartIDs.add(partID)
+    }
+    this.transitionCards.clear()
   }
 
   private enqueue(fn: () => Promise<void>): Promise<void> {

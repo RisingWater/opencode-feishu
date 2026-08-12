@@ -22,9 +22,9 @@ import { buildSessionKey } from "../session.js"
  *   其自带 CardKit 不可用时的纯文本占位降级）
  */
 function resolveChatHandler(deps: ChatDeps): typeof handleChat {
-  return deps.config.replyMode === "timeline" && deps.cardkit
-    ? handleTimelineChat
-    : handleChat
+  const useTimeline = deps.config.replyMode === "timeline" && deps.cardkit
+  deps.log("info", "resolveChatHandler", { replyMode: deps.config.replyMode, cardkit: !!deps.cardkit, useTimeline })
+  return useTimeline ? handleTimelineChat : handleChat
 }
 
 /** 单条待处理消息及其运行依赖。 */

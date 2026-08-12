@@ -16,7 +16,7 @@ import type { DetailPhaseSnapshot, LogFn, PermissionRequest, QuestionRequest } f
  */
 export type ProcessedAction =
   /** 文本内容更新；可能是 delta，也可能是整段快照。 */
-  | { type: "text-updated"; sessionId: string; delta?: string; fullText?: string }
+  | { type: "text-updated"; sessionId: string; delta?: string; fullText?: string; partID?: string; time?: number }
   /** 详细步骤阶段快照更新。 */
   | { type: "details-updated"; sessionId: string; phase: DetailPhaseSnapshot }
   /**
@@ -25,9 +25,21 @@ export type ProcessedAction =
    * partID 用于判定「新一轮思考」边界：相同 partID 是同一轮思考的持续输出，
    * partID 变化则意味着新的一轮思考开始。
    */
-  | { type: "reasoning-updated"; sessionId: string; partID: string; messageID: string; text: string }
-  /** 工具调用状态变化。 */
-  | { type: "tool-state-changed"; sessionId: string; callID: string; tool: string; state: "running" | "completed" | "error" }
+  | { type: "reasoning-updated"; sessionId: string; partID: string; messageID: string; text: string; time?: number }
+  /**
+   * 工具调用状态变化。
+   * input 为工具入参（如 bash 命令），output 为工具输出（completed 时携带）。
+   */
+  | {
+    type: "tool-state-changed"
+    sessionId: string
+    callID: string
+    tool: string
+    state: "running" | "completed" | "error"
+    input?: Record<string, unknown>
+    output?: string
+    time?: number
+  }
   /** OpenCode 发来权限请求。 */
   | { type: "permission-requested"; sessionId: string; request: PermissionRequest }
   /** OpenCode 发来问答请求。 */

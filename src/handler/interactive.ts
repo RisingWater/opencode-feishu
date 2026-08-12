@@ -36,6 +36,10 @@ export interface InteractiveDeps {
   log: LogFn
   /** OpenCode v2 client；缺失时无法进行权限/问答回传。 */
   v2Client?: OpencodeClient
+  /** OpenCode v1 client（插件运行时注入，baseUrl 已正确配置），abort 优先走它。 */
+  client?: import("@opencode-ai/sdk").OpencodeClient
+  /** OpenCode 工作目录，abort/reply 调用需要。 */
+  directory?: string
 }
 
 /** 去重：同一 requestId 只发一张卡片（TTL 防止内存泄漏） */
@@ -488,7 +492,7 @@ export async function handleCardAction(
       )
     }
 
-    if (!deps.v2Client) {
+    if (!deps.client && !deps.v2Client) {
       deps.log("warn", "OpenCode client 未配置，无法向 OpenCode 发起 abort", {
         runId: value.runId,
         sessionId: value.sessionId,
@@ -498,9 +502,23 @@ export async function handleCardAction(
     }
 
     // fire-and-forget 避免卡住飞书 3 秒回调窗口；requestAbortForRun 已把 run 置 aborting，toast 立即返回
-    void deps.v2Client.session.abort({
-      sessionID: value.sessionId,
-    }).then(() => {
+    // 优先用 v1 client（opencode 注入，baseUrl 正确），回退到 v2 client。
+    const abortRequest = deps.client
+      ? deps.client.session.abort({
+          path: { id: value.sessionId },
+          query: { directory: deps.directory },
+        })
+      : deps.v2Client!.session.abort({
+          sessionID: value.sessionId,
+          directory: deps.directory,
+        })
+    void Promise.resolve(abortRequest).then((res) => {
+      deps.log("info", "abort_reply session.abort 成功", {
+        runId: value.runId,
+        sessionId: value.sessionId,
+        viaV1: !!deps.client,
+        status: (res as { response?: { status?: number } }).response?.status,
+      })
       const latestRun = getRunByRunId(value.runId)
       if (latestRun && !isTerminalRunState(latestRun.state)) {
         confirmAbortForRun(value.runId)
@@ -510,6 +528,7 @@ export async function handleCardAction(
       deps.log("error", "abort_reply 后台 session.abort 失败", {
         runId: value.runId,
         sessionId: value.sessionId,
+        viaV1: !!deps.client,
         error: err instanceof Error ? err.message : String(err),
       })
     })

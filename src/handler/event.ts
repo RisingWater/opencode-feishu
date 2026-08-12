@@ -223,7 +223,7 @@ async function handleMessagePartUpdated(
     const p = part as Record<string, unknown>
     const toolName = String(p.tool ?? "unknown")
     const callID = String(p.callID ?? "")
-    const stateObj = p.state as { status?: string } | undefined
+    const stateObj = p.state as { status?: string; input?: Record<string, unknown>; output?: string } | undefined
     const rawStatus = stateObj?.status ?? (p.error != null ? "error" : "running")
     const toolState: "running" | "completed" | "error" = (rawStatus === "completed" || rawStatus === "error") ? rawStatus : "running"
 
@@ -234,6 +234,9 @@ async function handleMessagePartUpdated(
         callID,
         tool: toolName,
         state: toolState,
+        input: stateObj?.input,
+        output: stateObj?.output,
+        time: (p.time as { start?: number } | undefined)?.start,
       }, log)
     }
     return
@@ -253,6 +256,7 @@ async function handleMessagePartUpdated(
         partID,
         messageID,
         text: reasoningText,
+        time: (part as { time?: { start?: number } }).time?.start,
       }, log)
     }
     return
@@ -264,6 +268,10 @@ async function handleMessagePartUpdated(
   // subtask / file / step-start / step-finish / snapshot / patch / agent / retry / compaction
   // 这些都是 agent 内部状态（步骤边界 / 文件操作 / 压缩等），目前无 use case 需投影到飞书卡片
   if (part.type !== "text") return
+
+  // 忽略 synthetic 文本（插件/系统合成的回显，如工具结果、用户消息回显），
+  // 只投影真实模型输出的过渡/最终文本，避免过渡卡"复读提问"或重复内容。
+  if ((part as { synthetic?: boolean }).synthetic) return
 
   const fullText = extractPartText(part)
   if (fullText) {
@@ -295,6 +303,8 @@ async function handleMessagePartUpdated(
       sessionId: partSessionId,
       delta: undefined,
       fullText: payload.textBuffer,
+      partID: String((part as { id?: unknown }).id ?? ""),
+      time: (part as { time?: { start?: number } }).time?.start,
     }, log)
   }
 }

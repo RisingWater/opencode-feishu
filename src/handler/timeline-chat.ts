@@ -49,7 +49,6 @@ import {
   type AssistantSnapshot,
   type ChatDeps,
 } from "./chat.js"
-import { deriveReplyTitleFromParts } from "../feishu/result-card-view.js"
 
 /** 终态错误文案（与 single 模式 finalizeReply 对齐）。 */
 function terminalConclusionFor(
@@ -133,7 +132,6 @@ export async function handleTimelineChat(
   })
 
   const baseBody = { parts }
-  const replyTitle = deriveReplyTitleFromParts(parts)
 
   // 静默监听模式：只作为上下文送入 OpenCode，不给用户任何可见回复。
   if (!shouldReply) {
@@ -162,8 +160,10 @@ export async function handleTimelineChat(
     manager = new TimelineManager(deps.cardkit, feishuClient, chatId, log, {
       runId: run.runId,
       sessionId: session.id,
-      title: replyTitle,
+      userText: content,
     })
+    // 用户消息确认卡：立即展示"已收到，开始处理"，让用户感知任务已进入处理。
+    await manager.ensureUserMessageCard(content)
   }
 
   // 注册 pending 上下文。
@@ -182,13 +182,17 @@ export async function handleTimelineChat(
     if (!manager) return
     switch (action.type) {
       case "reasoning-updated":
-        await manager.ensureThinkingCard(action.partID, action.text)
+        log("info", "timeline.reasoning-updated", { partID: action.partID, len: action.text.length, manager: !!manager })
+        if (manager) await manager.ensureThinkingCard(action.partID, action.text)
         break
       case "tool-state-changed":
-        await manager.ensureToolCard(action.callID, action.tool, action.state)
+        log("info", "timeline.tool-state-changed", { callID: action.callID, tool: action.tool, state: action.state, manager: !!manager })
+        if (manager) await manager.ensureToolCard(action.callID, action.tool, action.state, action.input, action.output)
         break
       case "text-updated":
-        if (action.fullText) await manager.ensureFinalCard(action.fullText)
+        // 过渡叙述文本：独立卡片展示（工具调用前后的过程性文字），不带状态字样。
+        log("info", "timeline.text-updated", { partID: action.partID, len: action.fullText?.length ?? 0, preview: action.fullText?.slice(0, 80), manager: !!manager })
+        if (action.fullText && action.partID && manager) await manager.ensureTextCard(action.partID, action.fullText)
         break
       case "permission-requested":
         if (deps.interactiveDeps) {

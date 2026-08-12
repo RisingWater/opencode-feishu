@@ -86,7 +86,7 @@ const feishuRuntimePrompt = loadFeishuRuntimePrompt()
  * 它完成初始化后返回本插件注册的 hooks 集合。
  */
 export const FeishuPlugin: Plugin = async (ctx) => {
-  const { client } = ctx
+  const { client, serverUrl } = ctx
   // `gateway` 用于在各个 hook 闭包里判断网关是否已经成功初始化。
   let gateway: FeishuGatewayResult | null = null
 
@@ -131,6 +131,8 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   // 初始化去重缓存
   initDedup(resolvedConfig.dedupTtl)
 
+  log("info", "配置已加载", { configPath, replyMode: resolvedConfig.replyMode, appId: resolvedConfig.appId })
+
   // 创建 Lark Client（SDK 内置 token 管理 + HTTP 客户端）
   const larkClient = new Lark.Client({
     appId: resolvedConfig.appId,
@@ -144,8 +146,16 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   const botOpenId = await fetchBotOpenId(larkClient, log)
 
   // v2 client 主要用于权限审批/问答交互回调。
-  const v2Client = createOpencodeClient({ directory: resolvedConfig.directory || undefined })
-  const interactiveDeps: InteractiveDeps = { feishuClient: larkClient, log, v2Client }
+  // 必须显式传 baseUrl（v2 SDK 无默认地址），否则 abort/reply 请求会变成相对 URL 而失败。
+  // serverUrl 在 TUI 模式下可能是指向默认 4096 的错误地址；优先从 v1 client（opencode 正确注入）
+  // 读取真实 baseUrl，确保 abort/reply 落到实际监听的 server。
+  const injectedBaseUrl = (client as { getConfig?: () => { baseUrl?: string } }).getConfig?.()?.baseUrl
+  const v2BaseUrl = injectedBaseUrl?.replace(/\/$/, "")
+    ?? serverUrl?.toString().replace(/\/$/, "")
+    ?? "http://127.0.0.1:4096"
+  log("info", "v2 client baseUrl", { v2BaseUrl, injectedBaseUrl, serverUrl: serverUrl?.toString() })
+  const v2Client = createOpencodeClient({ directory: resolvedConfig.directory || undefined, baseUrl: v2BaseUrl })
+  const interactiveDeps: InteractiveDeps = { feishuClient: larkClient, log, v2Client, client, directory: resolvedConfig.directory }
 
   // 启动飞书 WebSocket 网关（复用 larkClient）
   gateway = startFeishuGateway({
