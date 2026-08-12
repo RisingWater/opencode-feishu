@@ -572,6 +572,19 @@ export async function handleCardAction(
     }, deps.log)
   }
 
+  // 回传成功后，把原卡片按钮替换为"已选择"状态，防止用户重复点击。
+  const markCardSelected = async (selectedText: string): Promise<void> => {
+    if (!action.messageId) return
+    const selectedCard = buildSelectedCard(selectedText)
+    const res = await sender.patchCardMessage(deps.feishuClient, action.messageId, selectedCard, deps.log)
+    if (!res.ok) {
+      deps.log("warn", "更新交互卡片为已选择状态失败", {
+        requestId: value.requestId,
+        error: res.error ?? "unknown",
+      })
+    }
+  }
+
   const onReplyFailed = (err: unknown): void => {
     deps.log("error", "交互回调处理失败", {
       action: value.action,
@@ -598,6 +611,8 @@ export async function handleCardAction(
         .then(() => {
           deps.log("info", "permission.reply 成功", { requestId: value.requestId, reply: value.reply, viaV1: !!deps.client })
           emitPhase("completed", successBody)
+          const selected = value.reply === "once" ? "✅ 已选择：允许一次" : value.reply === "always" ? "✅ 已选择：始终允许" : "❌ 已选择：拒绝"
+          void markCardSelected(selected)
         })
         .catch(onReplyFailed)
     } else {
@@ -619,6 +634,8 @@ export async function handleCardAction(
         .then(() => {
           deps.log("info", "question.reply 成功", { requestId: value.requestId, viaV1: !!v1Inner })
           emitPhase("completed", successBody)
+          const picked = value.answers?.[0]?.[0] ?? "已选择"
+          void markCardSelected(`✅ 已选择：${picked}`)
         })
         .catch(onReplyFailed)
     }
@@ -756,4 +773,24 @@ function buildQuestionCardDSL(request: QuestionRequest, chatId: string, chatType
 
   const dsl = { title: header, template: "blue", sections }
   return buildCardFromDSL(dsl, chatId, chatType)
+}
+
+/**
+ * 生成"已选择"状态的卡片 JSON（移除按钮，仅保留结果文本），
+ * 用于权限/问答卡片点击后替换原卡片，防止重复点击。
+ */
+function buildSelectedCard(selectedText: string): object {
+  return {
+    schema: "2.0",
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: "plain_text", content: selectedText },
+      template: "blue",
+    },
+    body: {
+      elements: [
+        { tag: "markdown", content: selectedText },
+      ],
+    },
+  }
 }

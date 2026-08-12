@@ -216,3 +216,32 @@ export async function sendCardMessage(
     log,
   )
 }
+
+/**
+ * 更新已有交互卡片消息（替换整个卡片 JSON）。
+ *
+ * 典型场景：权限/问答卡片被点击后，把按钮区替换成"已选择"状态，防止重复点击。
+ * 使用飞书 im.message.patch API，通过 message_id 定位消息。
+ *
+ * @param client 飞书 SDK Client 实例
+ * @param messageId 要更新的消息 ID
+ * @param card 新的卡片 JSON（interactive 消息的 content）
+ * @returns 发送结果（messageId 固定为传入的 messageId）
+ */
+export async function patchCardMessage(
+  client: InstanceType<typeof Lark.Client>,
+  messageId: string,
+  card: object,
+  log?: LogFn,
+): Promise<FeishuSendResult> {
+  return wrapSendCall(
+    () => client.im.message.patch({
+      path: { message_id: messageId },
+      data: {
+        content: JSON.stringify(card),
+      },
+    }),
+    log,
+    `patchCardMessage(${messageId})`,
+  )
+}
