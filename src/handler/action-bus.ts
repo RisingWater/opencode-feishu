@@ -19,6 +19,13 @@ export type ProcessedAction =
   | { type: "text-updated"; sessionId: string; delta?: string; fullText?: string }
   /** 详细步骤阶段快照更新。 */
   | { type: "details-updated"; sessionId: string; phase: DetailPhaseSnapshot }
+  /**
+   * 思考（reasoning part）内容快照更新。
+   *
+   * partID 用于判定「新一轮思考」边界：相同 partID 是同一轮思考的持续输出，
+   * partID 变化则意味着新的一轮思考开始。
+   */
+  | { type: "reasoning-updated"; sessionId: string; partID: string; messageID: string; text: string }
   /** 工具调用状态变化。 */
   | { type: "tool-state-changed"; sessionId: string; callID: string; tool: string; state: "running" | "completed" | "error" }
   /** OpenCode 发来权限请求。 */

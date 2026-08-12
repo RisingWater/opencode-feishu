@@ -82,6 +82,12 @@ export const FeishuConfigSchema = z.object({
   nudge: NudgeSchema.default(() => NudgeSchema.parse({})),
   /** OpenCode 工作目录，可在启动阶段进一步展开。 */
   directory: z.string().optional(),
+  /**
+   * 回复展示模式：
+   * - `single`：单张流式卡片承载一轮回复的全部内容（thinking/工具折叠在「详细步骤」）
+   * - `timeline`：时间线多卡——每轮 thinking、每个工具调用、最终答复各一张独立卡片
+   */
+  replyMode: z.enum(["single", "timeline"]).default("single"),
 })
 
 /**

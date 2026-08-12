@@ -58,6 +58,15 @@ export interface PendingReplyPayload {
   expectedMessageId?: string
   /** 当前轮是否已经观测到与本次 assistant message 关联的活动。 */
   hasActivity: boolean
+  /**
+   * 是否放宽 messageID 首条锁（timeline 多卡模式）。
+   *
+   * single 模式一个 run 的事件共享同一 messageID，首条锁可防串扰；
+   * timeline 模式一个 run 可能跨多个 assistant message（多轮 thinking/tool 各属不同
+   * message），锁会丢弃后续事件导致时间线卡片缺失。置 true 时首条仍记录 messageID，
+   * 但不再拦截后续不同 messageID 的事件——run 隔离改由 session-queue FIFO（L4）保证。
+   */
+  allowAnyMessageId?: boolean
 }
 
 /** 事件处理层运行所需依赖。 */
@@ -232,17 +241,18 @@ async function handleMessagePartUpdated(
 
   if (part.type === "reasoning") {
     const reasoningText = (part.text ?? "").trim()
+    const partID = String((part as Record<string, unknown>).id ?? "")
+    const messageID = String(part.messageID ?? "")
     if (reasoningText && partSessionId) {
+      // reasoning-updated：携带 partID 供消费方判定「新一轮思考」边界。
+      // single 模式在 chat.ts 订阅中转回 detailPhase（"中间思路"折叠项）；
+      // timeline 模式据此新建/更新独立的 thinking 卡片。
       emit(partSessionId, {
-        type: "details-updated",
+        type: "reasoning-updated",
         sessionId: partSessionId,
-        phase: {
-          phaseId: "reasoning",
-          label: "中间思路",
-          status: "running",
-          body: reasoningText,
-          updatedAt: new Date().toISOString(),
-        },
+        partID,
+        messageID,
+        text: reasoningText,
       }, log)
     }
     return
@@ -465,6 +475,15 @@ function extractPartText(part: { type?: string; text?: string; [key: string]: un
 
 function matchOrLatchMessageId(payload: PendingReplyPayload, messageId: unknown): boolean {
   const normalized = typeof messageId === "string" ? messageId.trim() : ""
+  // timeline 多卡模式：首条仍记录 messageID，但不再拦截后续不同 messageID 的事件，
+  // 因为同一 run 的 thinking/tool 可能分散在多个 assistant message 上。
+  if (payload.allowAnyMessageId) {
+    if (!payload.expectedMessageId && normalized) {
+      payload.expectedMessageId = normalized
+    }
+    return true
+  }
+
   if (!normalized) {
     // 一旦已经锁定 assistant messageID，就不再接受无法关联的模糊事件。
     return !payload.expectedMessageId

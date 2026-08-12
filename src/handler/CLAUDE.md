@@ -38,11 +38,18 @@
 - 按 sessionKey 归并消息，同一逻辑会话内严格串行消费，防止占位消息/流式卡片并发覆盖
 - `enqueueMessage()` 是唯一入口；`shouldReply=false` 的静默消息直接透传，不占用队列
 - 队列空闲时自动回收状态对象，避免长时间运行后空壳条目积累
+- `resolveChatHandler()` 按 `replyMode` 分发：`timeline` 且 CardKit 可用 → `handleTimelineChat`；其余（single，或 timeline 但 CardKit 不可用）→ `handleChat`
+
+**timeline-chat.ts** — 时间线多卡对话处理（`replyMode: "timeline"`）
+- 与 chat.ts 共享主链路骨架（session 绑定、baseline、promptAsync、轮询、classify/matchPluginError），差异仅在卡片渲染
+- 不预创建占位卡；action-bus 订阅里 `reasoning-updated` → `TimelineManager.ensureThinkingCard`（partID 判轮次）、`tool-state-changed` → `ensureToolCard`、`text-updated`/轮询快照 → `ensureFinalCard`（幂等，首个 text 才建）
+- `registerPending({ allowAnyMessageId: true })` 放宽首条 messageID 锁（见契约）；终态/错误分支统一走 `TimelineManager.finalize`
 
 **action-bus.ts** — per-session 轻量事件总线
 - `subscribe(sessionId, cb)` 注册订阅，返回幂等的 unsubscribe 函数；最后一个订阅者移除后清理空集合
 - `emit(sessionId, action)` fire-and-forget 广播，单个订阅者抛错不阻塞其他订阅者也不打断主流程
-- `ProcessedAction` 联合类型覆盖 7 种事件：text-updated、details-updated、tool-state-changed、permission-requested、question-requested、session-idle、assistant-meta-updated
+- `ProcessedAction` 联合类型覆盖 8 种事件：text-updated、details-updated、reasoning-updated、tool-state-changed、permission-requested、question-requested、session-idle、assistant-meta-updated
+- `reasoning-updated` 携带 `partID` 供消费方判定「新一轮思考」边界：same partID = 同一轮持续输出，partID 变化 = 新的一轮（timeline 模式据此新建 thinking 卡）
 
 **interactive.ts** — 权限/问答交互卡片与按钮回调
 - `handlePermissionRequested()` / `handleQuestionRequested()` 使用 `buildCardFromDSL` 构建交互卡片并发送到飞书，`seenIds` TtlMap 防止重复发送
@@ -133,6 +140,7 @@
 - 首个 `message.part.updated` 事件到达时把 `part.messageID` 写入 `expectedMessageId`。
 - 之后所有 messageID 不匹配的事件**静默丢弃**，防止同一 session 内多 run 事件串线到当前卡片。
 - 依赖：`session-queue.ts` 的 per-sessionKey FIFO 串行保证首个事件属于当前 run。改队列或 pending 生命周期时必须保留“首锁 + 后过滤”语义。
+- **放宽路径（timeline 多卡模式）**：`PendingReplyPayload.allowAnyMessageId=true` 时，首条仍记录 `expectedMessageId`，但**不再拦截**后续不同 messageID 的事件。原因：timeline 模式一个 run 可能跨多个 assistant message（多轮 thinking/tool 各属不同 messageID），锁会丢弃后续事件导致时间线卡片缺失。run 隔离改由 session-queue FIFO（L4）单独保证。改 `matchOrLatchMessageId` 必须同时核对两种模式的语义。
 
 ## 反模式修复回归原则（toast / async fire-and-forget）
 

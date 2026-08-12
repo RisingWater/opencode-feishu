@@ -111,6 +111,8 @@ bot 入群事件 → `ingestGroupHistory` 拉 `maxHistoryMessages` 条历史 →
 - abort 按钮只在主回复卡上——在 send_card 卡上找停止键会困惑
 - 权限/问答卡和主回复卡视觉相似度高，可能误以为审批后主回复就完成了，但**主回复仍在等模型继续**
 
+> `replyMode: "timeline"` 模式下视觉模型不同：一次 run 的每轮思考、每个工具调用都是独立卡片，按时间顺序排列，最终答复卡最后出现；**每张卡都带中断按钮**，任意位置可中断。此时 send_card tool 卡仍独立插入时间线。
+
 ---
 
 ## 7. 透传原则的 4 个反向边界
@@ -150,6 +152,7 @@ plugin 已经透传给 agent，但 agent 实际上**缺信息做对决策**：
 | `maxResourceSize` | 500MB | 资源 > 此值会下载中断 + 退化为占位文本，**用户不会被告知** |
 | `nudge.enabled` | false | 启用后 session.idle + 末尾 tool part 时 plugin 自发 synthetic prompt 让 agent 继续；用户**看不到这条 prompt**但能看到 agent 继续输出 |
 | `nudge.maxIterations` | 3 | 同一 session nudge 上限；超过后停止催促 |
+| `replyMode` | `"single"` | `timeline` 时一次 run 生成多张独立卡片（思考/工具/最终答复），最终答复卡**延迟到首个文本输出才出现**；`single` 保持单卡汇总。timeline 模式每张卡都带中断按钮，且放宽 messageID 首条锁（run 隔离由 FIFO 保证） |
 
 ---
 

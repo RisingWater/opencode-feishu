@@ -78,10 +78,12 @@ opencode
 | `nudge.intervalSeconds` | number | 否 | `30` | 同一 session 连续催促的最小间隔（秒） |
 | `nudge.maxIterations` | number | 否 | `3` | 同一 session 最大催促次数（用户新消息后重置） |
 | `nudge.message` | string | 否 | `"上一步操作已完成。请继续执行下一步，同步当前进度。如果全部完成，给出完整结果和结论。"` | 发送给 OpenCode 的 synthetic prompt 内容 |
+| `replyMode` | string | 否 | `"single"` | 回复展示模式：`single`=单张流式卡片汇总（thinking/工具折叠在「详细步骤」）；`timeline`=时间线多卡（每轮思考、每个工具调用、最终答复各一张独立卡片，均带中断按钮） |
 
 ## 特性
 
 - **CardKit 2.0 流式卡片** — AI 回复实时显示文本（markdown 渲染）和工具调用进度
+- **时间线多卡模式**（`replyMode: "timeline"`）— 每轮思考、每个工具调用各一张独立卡片按时间顺序排列，最终答复卡在首个文本输出时才出现；每张卡都带中断按钮。适合长流程（如写代码/改 bug）需要持续反馈的场景
 - **交互式卡片** — 权限审批和问答通过按钮完成（card.action.trigger 回调）
 - **Agent 卡片工具** — `feishu_send_card` tool，AI 自主决定何时使用卡片展示结构化内容
 - **运行时 prompt 分层** — `prompt.md` 仅注入飞书渠道事实和工具契约，`SKILL.md` 负责维护与评审，不再用插件侧 skill 主动塑形会话

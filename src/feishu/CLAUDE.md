@@ -39,6 +39,11 @@
 - 累积文本、工具状态、详细步骤快照，通过 result-card-view 渲染为 CardKit JSON
 - CardKit 更新失败后进入 degraded 状态，UI 不再刷新但仍累积内存数据
 
+**timeline-card.ts** — 时间线多卡管理（`replyMode: "timeline"`）
+- `TimelineCard`：单张轻量时间线卡（状态区 + 内容区 + 中断按钮），复用串行队列 + 200ms debounce；不复用 StreamingCard（single 模式零改动）
+- `TimelineManager`：多卡编排——`ensureThinkingCard`（partID 变化 → 旧卡定格 + 新建）、`ensureToolCard`（callID 区分，终态定格）、`ensureFinalCard`（幂等，首个 text 才建）、`finalize`（终态定格所有 active 卡）
+- 对外 API 全部串行（内部 queue），避免并发 SSE 事件建卡/更新竞态；建卡失败仅降级日志不阻断主流程
+
 **result-card-view.ts** — 结果卡 JSON 模板构建（v1.10.4 起：渲染层债务清理后简化）
 - 构建 ReplyCardView（用户消息标题升 header.title / 紧凑状态 / agent 文本原样 / 详细步骤 / 动作区），转换为 CardKit schema
 - 从 PromptPart 提炼标题升到 `header.title`（载体级，CardKit 协议字段）；从 ReplyRunState 推导紧凑状态文案和头部模板颜色

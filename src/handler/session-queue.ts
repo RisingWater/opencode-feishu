@@ -12,7 +12,20 @@
  */
 import type { FeishuMessageContext } from "../types.js"
 import { handleChat, type ChatDeps } from "./chat.js"
+import { handleTimelineChat } from "./timeline-chat.js"
 import { buildSessionKey } from "../session.js"
+
+/**
+ * 根据 replyMode 选择对话处理入口：
+ * - timeline 且 CardKit 可用 → 时间线多卡（handleTimelineChat）
+ * - 其余（single，或 timeline 但 CardKit 不可用）→ 单卡汇总（handleChat，
+ *   其自带 CardKit 不可用时的纯文本占位降级）
+ */
+function resolveChatHandler(deps: ChatDeps): typeof handleChat {
+  return deps.config.replyMode === "timeline" && deps.cardkit
+    ? handleTimelineChat
+    : handleChat
+}
 
 /** 单条待处理消息及其运行依赖。 */
 interface QueuedMessage {
@@ -61,7 +74,7 @@ function cleanupStateIfIdle(sessionKey: string, state: QueueState): void {
 export async function enqueueMessage(ctx: FeishuMessageContext, deps: ChatDeps): Promise<void> {
   // 静默消息只做上下文同步，不需要排队等待 UI 回复链路。
   if (!ctx.shouldReply) {
-    await handleChat(ctx, deps)
+    await resolveChatHandler(deps)(ctx, deps)
     return
   }
 
@@ -107,7 +120,7 @@ async function drainLoop(sessionKey: string, state: QueueState): Promise<void> {
       // while 条件已经保证数组非空，因此这里的非空断言是安全的。
       const item = state.queue.shift()!
       try {
-        await handleChat(item.ctx, item.deps)
+        await resolveChatHandler(item.deps)(item.ctx, item.deps)
       } catch (err) {
         item.deps.log("error", "队列消息处理失败", {
           sessionKey,

@@ -53,7 +53,7 @@ import {
  * 向 Langfuse 发送轻量 trace，关联 sessionId 和飞书 userId。
  * Fire-and-forget：不阻塞主流程，失败只记 error 日志。
  */
-function traceLangfuseUser(
+export function traceLangfuseUser(
   sessionId: string,
   userId: string,
   log: LogFn,
@@ -147,7 +147,7 @@ async function fetchActualModel(
  *
  * @returns true = 成功删除，调用方应重发 prompt；false = 未找到或删除失败
  */
-async function findAndCleanPoisonedMessage(params: {
+export async function findAndCleanPoisonedMessage(params: {
   v2Client: V2OpencodeClient
   sessionId: string
   rule: string
@@ -215,7 +215,7 @@ export interface ChatDeps {
   v2Client?: V2OpencodeClient
 }
 
-interface AssistantSnapshot {
+export interface AssistantSnapshot {
   text: string
   reasoning: string
 }
@@ -282,7 +282,7 @@ async function finalizeReply(params: FinalizeReplyParams): Promise<void> {
   await replyOrUpdate(feishuClient, chatId, fallbackPlaceholderId, buildSimpleFallbackText(view), log)
 }
 
-function mergeAbortSignals(signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+export function mergeAbortSignals(signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const activeSignals = signals.filter((item): item is AbortSignal => !!item)
   if (activeSignals.length === 0) return undefined
   if (activeSignals.length === 1) return activeSignals[0]
@@ -483,6 +483,20 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     cardUnsub = subscribe(activeSessionId, async (action) => {
       switch (action.type) {
         case "text-updated":
+          break
+        case "reasoning-updated":
+          // single 模式：把 reasoning 快照映射回「详细步骤」折叠面板的"中间思路"阶段。
+          {
+            const reasoningPhase: DetailPhaseSnapshot = {
+              phaseId: "reasoning",
+              label: "中间思路",
+              status: isTerminalRunState(observedRunState) ? "completed" : "running",
+              body: action.text,
+              updatedAt: new Date().toISOString(),
+            }
+            detailPhases.set("reasoning", reasoningPhase)
+            if (card) await card.setDetailPhase(reasoningPhase)
+          }
           break
         case "details-updated":
           detailPhases.set(action.phase.phaseId, action.phase)
@@ -897,7 +911,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
  * - 群聊消息会补发送者名称，避免模型分不清谁说的
  * - 文本消息走轻路径，非文本消息交给 content-extractor 深度解析
  */
-async function buildPromptParts(
+export async function buildPromptParts(
   feishuClient: InstanceType<typeof Lark.Client>,
   messageId: string,
   messageType: string,
@@ -1140,7 +1154,7 @@ function extractLastAssistantText(
   return extractLastAssistantSnapshot(messages).text
 }
 
-function extractLastAssistantSnapshot(
+export function extractLastAssistantSnapshot(
   messages: Array<{
     info: { role?: string; [key: string]: unknown }
     parts: Array<{ type?: string; text?: string; [key: string]: unknown }>
