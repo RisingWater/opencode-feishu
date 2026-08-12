@@ -601,14 +601,23 @@ export async function handleCardAction(
         })
         .catch(onReplyFailed)
     } else {
-      // 问答回传：v1 client 无 question 专用方法，走 v2 client。
-      const req = deps.v2Client!.question.reply({
-        requestID: value.requestId,
-        answers: value.answers,
-      })
+      // 问答回传：v2 client baseUrl 错误（4096），改用 v1 client 的通用 post 方法
+      // （v1 client 经 opencode 注入，拦截器会把相对路径路由到真实 server）。
+      const v1Inner = deps.client && (deps.client as unknown as { _client?: { post: (o: object) => Promise<unknown> } })._client
+      const req = v1Inner
+        ? v1Inner.post({
+            url: "/question/{requestID}/reply",
+            path: { requestID: value.requestId },
+            body: { answers: value.answers },
+            query: { directory: deps.directory },
+          })
+        : deps.v2Client!.question.reply({
+            requestID: value.requestId,
+            answers: value.answers,
+          })
       void Promise.resolve(req)
         .then(() => {
-          deps.log("info", "question.reply 成功", { requestId: value.requestId })
+          deps.log("info", "question.reply 成功", { requestId: value.requestId, viaV1: !!v1Inner })
           emitPhase("completed", successBody)
         })
         .catch(onReplyFailed)
