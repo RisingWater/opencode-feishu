@@ -59,6 +59,26 @@ cd bridge
 - 配置了 `bridge` 即进入 bridge 模式：不需要 `appId`/`appSecret`
 - `directory` 是该实例的工作区路径，bridge 用它区分实例（**同一 bridge 不允许重复**）
 
+## 远程部署（bridge 与 opencode 不同机）
+
+bridge 默认只监听 `127.0.0.1`。当 bridge 与 opencode 实例不在同一台机器时：
+
+1. **bridge 侧** `bridge.json`：`"host": "0.0.0.0"`（或内网 IP），并**务必配置强随机 `token`**
+   （监听非回环地址且未配 token 时启动会打 WARNING——WS 端口裸奔等于把飞书消息内容和
+   全部 API 权限暴露给任何能连上该端口的人）。参考 `config.example.remote.json`。
+2. **每台 opencode 机器** `~/.config/opencode/plugins/feishu.json`：
+
+   ```json
+   { "bridge": { "url": "ws://<bridge 主机 IP>:8787", "token": "<与 bridge 一致>" }, "replyMode": "timeline" }
+   ```
+
+3. 注意：`/ws open <n>` 拉起的 opencode 进程运行在 **bridge 所在机器**；
+   跨机部署时受管工作区应指向 bridge 机器上的路径，各开发机上的实例用
+   插件注册（自动出现在选择卡片的「在线实例」里），不需要写进 `workspaces`。
+4. `defaultWorkspace`、绑定表（`stateFile`）都在 bridge 侧，与插件机器无关。
+
+跨机流量是明文 WS，仅在可信内网使用；公网建议套 TLS 反代（如 nginx/caddy 转发 wss://）。
+
 ## 使用
 
 1. **绑定**：在任意聊天窗口第一次 @bot / 私聊 bot 时，会收到「选择目标工作区」卡片：

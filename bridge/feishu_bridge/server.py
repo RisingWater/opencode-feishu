@@ -60,6 +60,12 @@ class BridgeServer:
                 ping_timeout=20,
             ):
                 self.log.info("bridge WS 服务已监听 ws://%s:%d", self.config.host, self.config.port)
+                if self.config.host not in ("127.0.0.1", "localhost", "::1") and not self.config.token:
+                    self.log.warning(
+                        "监听地址 %s 非回环地址且未配置 token——任何能访问该端口的人都可以"
+                        "注册插件实例、读取消息内容并调用飞书 API！强烈建议在 bridge.json 配置 token。",
+                        self.config.host,
+                    )
                 await asyncio.Future()  # run forever
         except asyncio.CancelledError:
             raise
