@@ -1,5 +1,9 @@
 /**
- * 飞书 WebSocket 网关。
+ * 飞书事件网关。
+ *
+ * direct 模式：创建飞书 WSClient 长连接，接收飞书事件。
+ * bridge 模式：不连飞书；事件由 bridge 中继客户端推送进来，
+ * 通过 `handleGatewayEvent()` 分发到与 direct 模式相同的处理逻辑。
  *
  * 它负责把飞书事件世界翻译成仓库内部可消费的三个入口：
  * - `onMessage`：收到一条可处理消息
@@ -51,6 +55,11 @@ export interface FeishuGatewayResult {
   client: InstanceType<typeof Lark.Client>
   /** 主动关闭 WebSocket 连接的函数。 */
   stop: () => void
+  /**
+   * bridge 模式专用：把 bridge 推送的飞书事件分发到内部处理链路。
+   * direct 模式为 undefined（事件由 SDK dispatcher 直接驱动）。
+   */
+  handleGatewayEvent?: (eventType: string, payload: Record<string, unknown>) => Promise<unknown>
 }
 
 /**
@@ -196,11 +205,33 @@ function buildFormSubmitEnvelope(evt: CardActionEvt, log?: LogFn): FormSubmitAct
 }
 
 /**
- * 启动飞书 WebSocket 网关，返回 Client（供 sender 使用）和 stop 函数
+ * 启动飞书事件网关。
+ *
+ * `config.bridge` 存在时进入 bridge 模式：不创建飞书 WSClient，
+ * 返回 `handleGatewayEvent` 供 bridge 中继驱动；其余逻辑完全一致。
  */
 export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGatewayResult {
   const { config, larkClient, botOpenId = "", onMessage, onBotAdded, onCardAction, log } = options
-  const { appId, appSecret } = config
+
+  // ────────────── bridge 模式：事件处理函数注册表，与 direct 模式共享 ──────────────
+  if (config.bridge) {
+    const handlers = buildEventHandlers({ larkClient, botOpenId, onMessage, onBotAdded, onCardAction, log })
+    return {
+      client: larkClient,
+      stop: () => log("info", "bridge 模式下网关无自有连接需要停止"),
+      handleGatewayEvent: async (eventType, payload) => {
+        const handler = handlers[eventType]
+        if (!handler) {
+          log("warn", "bridge 事件无对应处理器", { eventType })
+          return undefined
+        }
+        return handler(payload)
+      },
+    }
+  }
+
+  // direct 模式：loadAndValidateConfig 已确保 appId/appSecret 存在。
+  const { appId, appSecret } = config as { appId: string; appSecret: string }
   // 优先读取常见代理环境变量，让 WebSocket 也能跟随企业网络设置。
   const proxyUrl =
     process.env.HTTPS_PROXY ||
@@ -216,9 +247,66 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
   }
 
   // EventDispatcher 是飞书 SDK 的事件分发核心；这里只注册我们真正关心的几类事件。
-  const dispatcher = new Lark.EventDispatcher({}).register({
+  // 处理函数由 buildEventHandlers 构造，bridge/direct 两种模式共享同一实现。
+  const dispatcher = new Lark.EventDispatcher({}).register(buildEventHandlers({
+    larkClient, botOpenId, onMessage, onBotAdded, onCardAction, log,
+  }))
+
+  const logLevelMap: Record<string, Lark.LoggerLevel> = {
+    fatal: Lark.LoggerLevel.fatal,
+    error: Lark.LoggerLevel.error,
+    warn: Lark.LoggerLevel.warn,
+    info: Lark.LoggerLevel.info,
+    debug: Lark.LoggerLevel.debug,
+    trace: Lark.LoggerLevel.trace,
+  }
+
+  const wsClient = new Lark.WSClient({
+    appId,
+    appSecret,
+    domain: Lark.Domain.Feishu,
+    ...(wsAgent ? { agent: wsAgent } : {}),
+    loggerLevel: logLevelMap[config.logLevel] ?? Lark.LoggerLevel.info,
+    logger: {
+      // 飞书 SDK 的不同级别统一桥接到项目日志系统。
+      error: (...msg: unknown[]) => log("error", "[lark.ws]", { msg }),
+      warn: (...msg: unknown[]) => log("warn", "[lark.ws]", { msg }),
+      info: (...msg: unknown[]) => log("info", "[lark.ws]", { msg }),
+      debug: (...msg: unknown[]) => log("info", "[lark.ws]", { msg }),
+      trace: (...msg: unknown[]) => log("info", "[lark.ws]", { msg }),
+    },
+  })
+
+  wsClient.start({ eventDispatcher: dispatcher })
+  log("info", "飞书 WebSocket 网关已启动", { appIdPrefix: appId.slice(0, 8) + "..." })
+
+  const stop = () => {
+    // 停止时只需要关闭 WSClient；飞书 SDK 自身会处理底层连接资源。
+    log("info", "飞书 WebSocket 网关停止中")
+    wsClient.close()
+    log("info", "飞书 WebSocket 网关已停止")
+  }
+
+  return { client: larkClient, stop }
+}
+
+/**
+ * 构造飞书事件处理函数集合。
+ *
+ * 这是事件处理的唯一实现：direct 模式注册到 SDK EventDispatcher，
+ * bridge 模式经 `handleGatewayEvent()` 按 eventType 分发，行为完全一致。
+ */
+function buildEventHandlers(deps: {
+  larkClient: InstanceType<typeof Lark.Client>
+  botOpenId: string
+  onMessage: (ctx: FeishuMessageContext) => void | Promise<void>
+  onBotAdded?: (chatId: string) => void | Promise<void>
+  onCardAction?: (action: CardActionData) => Promise<object | undefined>
+  log: LogFn
+}): Record<string, (data: Record<string, unknown>) => Promise<unknown>> {
+  const { larkClient, botOpenId, onMessage, onBotAdded, onCardAction, log } = deps
+  return {
     "im.message.receive_v1": async (data: Record<string, unknown>) => {
-      // catch 块需要这两个值来发送兜底消息，提前声明。
       let fallbackChatId: string | undefined
       let fallbackShouldReply = false
       try {
@@ -646,44 +734,7 @@ export function startFeishuGateway(options: FeishuGatewayOptions): FeishuGateway
         return {}
       }
     },
-  })
-
-  const logLevelMap: Record<string, Lark.LoggerLevel> = {
-    fatal: Lark.LoggerLevel.fatal,
-    error: Lark.LoggerLevel.error,
-    warn: Lark.LoggerLevel.warn,
-    info: Lark.LoggerLevel.info,
-    debug: Lark.LoggerLevel.debug,
-    trace: Lark.LoggerLevel.trace,
   }
-
-  const wsClient = new Lark.WSClient({
-    appId,
-    appSecret,
-    domain: Lark.Domain.Feishu,
-    ...(wsAgent ? { agent: wsAgent } : {}),
-    loggerLevel: logLevelMap[config.logLevel] ?? Lark.LoggerLevel.info,
-    logger: {
-      // 飞书 SDK 的不同级别统一桥接到项目日志系统。
-      error: (...msg: unknown[]) => log("error", "[lark.ws]", { msg }),
-      warn: (...msg: unknown[]) => log("warn", "[lark.ws]", { msg }),
-      info: (...msg: unknown[]) => log("info", "[lark.ws]", { msg }),
-      debug: (...msg: unknown[]) => log("info", "[lark.ws]", { msg }),
-      trace: (...msg: unknown[]) => log("info", "[lark.ws]", { msg }),
-    },
-  })
-
-  wsClient.start({ eventDispatcher: dispatcher })
-  log("info", "飞书 WebSocket 网关已启动", { appIdPrefix: appId.slice(0, 8) + "..." })
-
-  const stop = () => {
-    // 停止时只需要关闭 WSClient；飞书 SDK 自身会处理底层连接资源。
-    log("info", "飞书 WebSocket 网关停止中")
-    wsClient.close()
-    log("info", "飞书 WebSocket 网关已停止")
-  }
-
-  return { client: larkClient, stop }
 }
 
 /**

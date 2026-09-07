@@ -88,7 +88,7 @@ export async function handleTimelineChat(
   // /new：显式会话重置，与 single 模式一致。
   if (shouldReply && messageType === "text" && content.trim() === "/new") {
     invalidateSession(sessionKey)
-    const freshSession = await getOrCreateSession(client, sessionKey, directory)
+    const freshSession = await getOrCreateSession(client, sessionKey, directory, chatId)
     registerSessionChat(freshSession.id, chatId, chatType)
     clearNudge(freshSession.id)
     clearRetryAttempts(sessionKey)
@@ -109,7 +109,7 @@ export async function handleTimelineChat(
     return undefined
   }
 
-  const session = await getOrCreateSession(client, sessionKey, directory)
+  const session = await getOrCreateSession(client, sessionKey, directory, chatId)
   registerSessionChat(session.id, chatId, chatType)
   traceLangfuseUser(session.id, senderId, log)
   clearNudge(session.id)

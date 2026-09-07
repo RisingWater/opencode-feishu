@@ -52,6 +52,20 @@ const NudgeSchema = z.object({
 })
 
 /**
+ * bridge 模式配置。
+ *
+ * 配置中存在 `bridge` 字段时插件进入 bridge 模式：不再直连飞书，
+ * 而是连接本地 Python bridge 服务（它持有飞书凭据和 WebSocket 长连接），
+ * 事件从 bridge 转发进来，飞书 API 调用经 RPC 代理到 bridge。
+ */
+const BridgeSchema = z.object({
+  /** bridge 服务 WebSocket 地址，例如 ws://127.0.0.1:8787。 */
+  url: z.string().min(1, "bridge.url 不能为空"),
+  /** 可选共享 token；bridge 配置了 token 时必须一致。 */
+  token: z.string().optional(),
+})
+
+/**
  * 飞书插件配置 schema。
  *
  * 这里同时承担：
@@ -60,10 +74,10 @@ const NudgeSchema = z.object({
  * 3. TypeScript 类型推导源
  */
 export const FeishuConfigSchema = z.object({
-  /** 飞书自建应用 appId。 */
-  appId: z.string().min(1, "appId 不能为空"),
-  /** 飞书自建应用 appSecret。 */
-  appSecret: z.string().min(1, "appSecret 不能为空"),
+  /** 飞书自建应用 appId；bridge 模式下可省略（凭据由 bridge 持有）。 */
+  appId: z.string().min(1, "appId 不能为空").optional(),
+  /** 飞书自建应用 appSecret；bridge 模式下可省略（凭据由 bridge 持有）。 */
+  appSecret: z.string().min(1, "appSecret 不能为空").optional(),
   /** 对话轮询总超时。 */
   timeout: z.number().int().positive().optional(),
   /** 飞书 SDK 的内部日志等级。 */
@@ -83,6 +97,11 @@ export const FeishuConfigSchema = z.object({
   /** OpenCode 工作目录，可在启动阶段进一步展开。 */
   directory: z.string().optional(),
   /**
+   * bridge 模式配置。存在时插件连接本地 bridge 服务而非直连飞书，
+   * appId/appSecret 由 bridge 持有，插件侧无需配置。
+   */
+  bridge: BridgeSchema.optional(),
+  /**
    * 回复展示模式：
    * - `single`：单张流式卡片承载一轮回复的全部内容（thinking/工具折叠在「详细步骤」）
    * - `timeline`：时间线多卡——每轮 thinking、每个工具调用、最终答复各一张独立卡片
@@ -101,6 +120,13 @@ export type FeishuPluginConfig = z.input<typeof FeishuConfigSchema>
  * 经过 Zod 补齐默认值后的“运行态”配置。
  */
 export type ResolvedConfig = z.infer<typeof FeishuConfigSchema> & { directory: string }
+
+/**
+ * 是否处于 bridge 模式：配置了 `bridge` 字段即为 bridge 模式。
+ */
+export function isBridgeMode(config: ResolvedConfig): boolean {
+  return !!config.bridge
+}
 
 /**
  * 项目内部统一日志函数签名。

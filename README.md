@@ -64,8 +64,10 @@ opencode
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|:----:|--------|------|
-| `appId` | string | 是 | — | 飞书应用 App ID |
-| `appSecret` | string | 是 | — | 飞书应用 App Secret |
+| `appId` | string | 直连必填 | — | 飞书应用 App ID（bridge 模式下由 bridge 持有，无需配置） |
+| `appSecret` | string | 直连必填 | — | 飞书应用 App Secret（bridge 模式下由 bridge 持有，无需配置） |
+| `bridge.url` | string | 否 | — | 配置后进入 **bridge 模式**：连接本地 bridge 服务而非直连飞书，如 `ws://127.0.0.1:8787`。适合多工作区共用一个机器人，见 [bridge/README.md](./bridge/README.md) |
+| `bridge.token` | string | 否 | — | bridge 服务鉴权 token（bridge 配置了才需要） |
 | `timeout` | number | 否 | `未设置` | 对话轮询总超时（毫秒）；未配置时不设固定超时，持续等待直到 OpenCode session.idle、检测到 SSE 错误或请求被中断 |
 | `logLevel` | string | 否 | `"info"` | 日志级别：fatal/error/warn/info/debug/trace |
 | `maxHistoryMessages` | number | 否 | `200` | 入群时最多摄入的历史消息条数（飞书接口按 50/页分页拉取） |
@@ -102,6 +104,13 @@ opencode
 ## 产品行为
 
 完整的产品行为契约（消息流程、责任分界、错误体验、不变量、配置如何影响行为）见 **[BEHAVIOR.md](./BEHAVIOR.md)**。
+
+### 多工作区（bridge 模式）
+
+一个飞书机器人要服务多个项目工作区时，可在后台运行一个 Python bridge 服务：
+它持有飞书凭据、按「聊天窗口 → 工作区」路由消息，并提供 `/ws list|use|open|close|new` 指令
+在聊天里直接切换/启停工作区。未绑定的窗口发消息会收到选择卡片。
+详见 **[bridge/README.md](./bridge/README.md)**。
 
 简表速查：
 

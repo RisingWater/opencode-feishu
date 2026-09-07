@@ -41,6 +41,9 @@ import { createRequestFormTool } from "./tools/request-form.js"                 
 import { getChatIdBySession } from "./feishu/session-chat-map.js"                  // 会话 → 聊天 ID 映射查询（判断是否飞书会话）
 import { createOpencodeClient } from "@opencode-ai/sdk/v2/client"                  // OpenCode v2 REST 客户端（用于权限/问答交互回复）
 import { TtlMap } from "./utils/ttl-map.js" // 引入已有的 TtlMap：60s 缓存 config.get() 结果，消除 system.transform 每次触发都调 HTTP 的开销
+import { startRelayClient, type RelayClient } from "./bridge/relay-client.js" // bridge 模式：与 Python bridge 服务的 WS 中继
+import { createBridgeLarkShim } from "./bridge/lark-shim.js" // bridge 模式：Lark Client 形状的 RPC 代理
+import { setSessionOverride, listOpenCodeSessions } from "./bridge/session-bridge.js" // bridge 会话绑定 override + session 列表查询
 
 /** 日志服务标识，所有 client.app.log() 调用都携带此名称 */
 const SERVICE_NAME = "opencode-feishu"
@@ -131,16 +134,78 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   // 初始化去重缓存
   initDedup(resolvedConfig.dedupTtl)
 
-  log("info", "配置已加载", { configPath, replyMode: resolvedConfig.replyMode, appId: resolvedConfig.appId })
+  const bridgeMode = !!resolvedConfig.bridge
+  log("info", "配置已加载", { configPath, replyMode: resolvedConfig.replyMode, appId: resolvedConfig.appId, bridgeMode })
 
-  // 创建 Lark Client（SDK 内置 token 管理 + HTTP 客户端）
-  const larkClient = new Lark.Client({
-    appId: resolvedConfig.appId,
-    appSecret: resolvedConfig.appSecret,
-    domain: Lark.Domain.Feishu,
-    appType: Lark.AppType.SelfBuild,
-  })
+  // ────────────── 双模式客户端选择 ──────────────
+  // bridge 模式：插件连接本地 Python bridge 服务，飞书 API 经 RPC 代理；
+  // direct 模式：直连飞书（原有行为）。
+  let relay: RelayClient | null = null
+  let larkClient: InstanceType<typeof Lark.Client>
+
+  if (resolvedConfig.bridge) {
+    relay = startRelayClient({
+      url: resolvedConfig.bridge.url,
+      token: resolvedConfig.bridge.token,
+      workspace: resolvedConfig.directory || ctx.directory || "",
+      onReady: () => log("info", "bridge 模式就绪"),
+      onEvent: async (msg) => {
+        log("info", "bridge event 到达", { eventType: msg.eventType, hasPayload: !!msg.payload })
+        if (!gateway?.handleGatewayEvent) {
+          log("warn", "bridge event 丢弃：gateway 未就绪", { eventType: msg.eventType })
+          return
+        }
+        try {
+          await gateway.handleGatewayEvent(msg.eventType, msg.payload)
+        } catch (err) {
+          log("error", "bridge 事件处理失败", {
+            eventType: msg.eventType,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      },
+      onBind: (msg) => {
+        // bridge 的会话绑定控制：chatId → sessionId override。
+        setSessionOverride(msg.chatId, msg.sessionId)
+        log("info", "bridge 会话绑定已更新", { chatId: msg.chatId, sessionId: msg.sessionId })
+      },
+      onListSessions: (msg) => {
+        // bridge 选择卡片请求当前实例的 session 列表。
+        listOpenCodeSessions(client, resolvedConfig.directory)
+          .then((sessions) => relay?.respondSessions(msg.reqId, sessions))
+          .catch((err) => {
+            log("error", "list_sessions 应答失败", { error: err instanceof Error ? err.message : String(err) })
+            relay?.respondSessions(msg.reqId, [])
+          })
+      },
+      onDisconnect: () => {
+        log("warn", "与 bridge 的连接断开；飞书消息将不可用，自动重连中", {
+          url: resolvedConfig.bridge?.url,
+        })
+      },
+      log,
+    })
+    // 伪 Lark Client：方法子集 + RPC 代理，注入现有 feishu/ 模块依赖位。
+    larkClient = createBridgeLarkShim(relay, log) as unknown as InstanceType<typeof Lark.Client>
+  } else {
+    // 创建 Lark Client（SDK 内置 token 管理 + HTTP 客户端）
+    larkClient = new Lark.Client({
+      appId: resolvedConfig.appId!,
+      appSecret: resolvedConfig.appSecret!,
+      domain: Lark.Domain.Feishu,
+      appType: Lark.AppType.SelfBuild,
+    })
+  }
   const cardkit = new CardKitClient(larkClient, log)
+
+  // bridge 模式下 relay 是异步握手的；fetchBotOpenId 立刻 RPC 会撞上"bridge 未就绪"。
+  // 等待连接就绪（最多 10s），失败时给出明确错误而不是让插件加载半途而废。
+  if (relay) {
+    const ready = await waitForRelayReady(relay, 10_000)
+    if (!ready) {
+      throw new Error(`${LOG_PREFIX} bridge 服务连接超时（${resolvedConfig.bridge?.url}）；请确认 bridge 进程已启动`)
+    }
+  }
 
   // 获取 bot open_id（用于群聊 @提及检测）
   const botOpenId = await fetchBotOpenId(larkClient, log)
@@ -199,7 +264,8 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   })
 
   log("info", "飞书插件已初始化", {
-    appId: resolvedConfig.appId.slice(0, 8) + "...",
+    mode: bridgeMode ? "bridge" : "direct",
+    appId: resolvedConfig.appId ? resolvedConfig.appId.slice(0, 8) + "..." : "(由 bridge 持有)",
     botOpenId,
   })
 
@@ -286,11 +352,15 @@ export const FeishuPlugin: Plugin = async (ctx) => {
  */
 function loadAndValidateConfig(configPath: string, ctxDirectory: string): ResolvedConfig {
   if (!existsSync(configPath)) {
-    throw new Error(`缺少飞书配置文件：请创建 ${configPath}，内容为 {"appId":"cli_xxx","appSecret":"xxx"}`)
+    throw new Error(`缺少飞书配置文件：请创建 ${configPath}，内容为 {"appId":"cli_xxx","appSecret":"xxx"}（bridge 模式只需 {"bridge":{"url":"ws://127.0.0.1:8787"}}）`)
   }
   // 先 JSON.parse，再递归展开字符串里的环境变量占位符。
   const raw = resolveEnvPlaceholders(JSON.parse(readFileSync(configPath, "utf-8")))
   const parsed = FeishuConfigSchema.parse(raw)
+  // bridge 模式下凭据由 bridge 服务持有，直连模式必须提供 appId/appSecret。
+  if (!parsed.bridge && (!parsed.appId || !parsed.appSecret)) {
+    throw new Error("直连模式需要配置 appId 和 appSecret；如使用 bridge 服务，请改为配置 bridge.url")
+  }
   // directory 在这里统一展开成最终运行时路径。
   return { ...parsed, directory: expandDirectoryPath(parsed.directory ?? ctxDirectory ?? "") }
 }
@@ -345,6 +415,24 @@ function resolveEnvPlaceholders(obj: unknown): unknown {
     return result
   }
   return obj
+}
+
+/**
+ * 轮询等待 relay 与 bridge 完成 hello 握手。
+ */
+function waitForRelayReady(relay: RelayClient, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const started = Date.now()
+    const timer = setInterval(() => {
+      if (relay.isReady()) {
+        clearInterval(timer)
+        resolve(true)
+      } else if (Date.now() - started > timeoutMs) {
+        clearInterval(timer)
+        resolve(false)
+      }
+    }, 200)
+  })
 }
 
 /**

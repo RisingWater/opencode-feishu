@@ -20,3 +20,8 @@ _Organized
 docs
 output
 .npm-cache
+
+# Python bridge
+bridge/.venv/
+bridge/**/__pycache__/
+*.pyc

@@ -325,7 +325,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   // 在插件层处理，避免把命令透传给模型后只返回“口头确认”却未真正切换 session。
   if (shouldReply && messageType === "text" && content.trim() === "/new") {
     invalidateSession(sessionKey)
-    const freshSession = await getOrCreateSession(client, sessionKey, directory)
+    const freshSession = await getOrCreateSession(client, sessionKey, directory, chatId)
     registerSessionChat(freshSession.id, chatId, chatType)
     clearNudge(freshSession.id)
     clearRetryAttempts(sessionKey)
@@ -356,7 +356,7 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   }
 
   // 绑定或恢复 OpenCode session，并刷新 session → 飞书聊天映射。
-  const session = await getOrCreateSession(client, sessionKey, directory)
+  const session = await getOrCreateSession(client, sessionKey, directory, chatId)
   registerSessionChat(session.id, chatId, chatType)
   traceLangfuseUser(session.id, senderId, log)
   // 用户有新消息时，说明插件不该再沿用之前的 idle 催促计数。

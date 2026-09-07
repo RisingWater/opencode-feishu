@@ -5,6 +5,7 @@
  */
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import { TtlMap } from "./utils/ttl-map.js"
+import { getSessionOverride } from "./bridge/session-bridge.js"
 
 /** 逻辑会话键的固定前缀，避免与其他渠道混淆。 */
 const SESSION_KEY_PREFIX = "feishu"
@@ -72,7 +73,22 @@ export async function getOrCreateSession(
   client: OpencodeClient,
   sessionKey: string,
   directory?: string,
+  /** bridge 绑定查询键：存在时优先使用 bridge 推送的 chatId → sessionId 绑定。 */
+  chatId?: string,
 ): Promise<{ id: string; title?: string }> {
+  // 第零层：bridge 会话绑定。用户通过 bridge 选择卡片显式绑定的 session
+  // 拥有最高优先级，且不受 forceCreateSession / 本地缓存影响。
+  if (chatId) {
+    const overrideId = getSessionOverride(chatId)
+    if (overrideId) {
+      // 绑定可能跨进程重启仍有效，刷新缓存以便 title 反查等路径可用。
+      const cached = sessionCache.get(sessionKey)
+      const session = (cached && cached.id === overrideId) ? cached : { id: overrideId }
+      sessionCache.set(sessionKey, session)
+      return session
+    }
+  }
+
   // 如果该逻辑会话刚被判定为“必须新建”，则本轮禁止命中任何旧 session。
   const mustCreateFresh = forceCreateSession.has(sessionKey)
   // 第一层：本地缓存命中时直接返回，避免频繁 list session。

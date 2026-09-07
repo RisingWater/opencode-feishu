@@ -1,0 +1,18 @@
+{
+  "appId": "cli_xxxxxxxx",
+  "appSecret": "你的应用密钥",
+  "host": "127.0.0.1",
+  "port": 8787,
+  "token": "可选-插件连接鉴权token",
+  "admins": ["ou_xxxxxxxx"],
+  "commandPrefix": "/ws",
+  "basePort": 14000,
+  "stateFile": "bridge-state.json",
+  "pickTimeoutSeconds": 300,
+  "queueMaxMessages": 20,
+  "defaultWorkspace": null,
+  "workspaces": [
+    { "path": "/home/me/project-a" },
+    { "path": "/home/me/project-b", "command": "opencode serve --port {port} --hostname 127.0.0.1" }
+  ]
+}
